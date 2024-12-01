@@ -6,9 +6,10 @@ from tensorflow.keras.applications import EfficientNetB7
 from tensorflow.keras.layers import Dense, GlobalAveragePooling2D
 from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
-from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score, f1_score
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score, f1_score, precision_score, recall_score
 import numpy as np
 import matplotlib.pyplot as plt
+from sklearn.metrics import roc_curve, auc, precision_recall_curve, average_precision_score
 
 # GPU 설정: MirroredStrategy 사용
 gpus = tf.config.list_physical_devices('GPU')
@@ -60,35 +61,6 @@ validation_generator = datagen.flow_from_directory(
     subset="validation"
 )
 
-# 배치별 ETA 계산용 Callback 클래스
-class BatchETACallback(tf.keras.callbacks.Callback):
-    def __init__(self, epochs, steps_per_epoch):
-        super().__init__()
-        self.epochs = epochs
-        self.steps_per_epoch = steps_per_epoch
-        self.batch_times = []
-        self.start_time = None
-
-    def on_epoch_begin(self, epoch, logs=None):
-        self.start_time = time.time()
-        self.batch_times = []
-
-    def on_batch_end(self, batch, logs=None):
-        batch_time = time.time() - self.start_time
-        self.batch_times.append(batch_time)
-        avg_batch_time = np.mean(self.batch_times)
-
-        remaining_batches = self.steps_per_epoch - (batch + 1)
-        eta = avg_batch_time * remaining_batches
-        print(f"Epoch {self.epochs}/{self.epochs}, Batch {batch + 1}/{self.steps_per_epoch}, ETA: {eta // 60:.0f}m {eta % 60:.0f}s")
-
-    def on_epoch_end(self, epoch, logs=None):
-        epoch_time = time.time() - self.start_time
-        print(f"Epoch {epoch + 1}/{self.epochs} finished. Time taken: {epoch_time // 60:.0f}m {epoch_time % 60:.0f}s")
-
-# 배치별 ETA 콜백 추가
-batch_eta_callback = BatchETACallback(epochs=epochs, steps_per_epoch=train_generator.samples // batch_size)
-
 # 모델 정의
 with strategy.scope():
     base_model = EfficientNetB7(
@@ -109,15 +81,24 @@ with strategy.scope():
                   loss="binary_crossentropy",
                   metrics=["accuracy", "Precision", "Recall"])
 
+# 학습 시작 시간 기록
+start_time = time.time()
+
 # 모델 학습
 history = model.fit(
     train_generator,
     validation_data=validation_generator,
     epochs=epochs,
-    steps_per_epoch=train_generator.samples // batch_size,
-    validation_steps=validation_generator.samples // batch_size,
-    callbacks=[batch_eta_callback]
+    batch_size=batch_size,
+    class_weight={0: 1., 1: 2.}  # class_weight 설정으로 정상 사이트의 정확도를 높임
 )
+
+# 학습 종료 시간 기록
+end_time = time.time()
+
+# 학습 시간 출력
+training_time = end_time - start_time
+print(f"Training time: {training_time // 60:.0f}m {training_time % 60:.0f}s")
 
 # 모델 저장
 os.makedirs(os.path.dirname(model_save_path), exist_ok=True)
@@ -147,35 +128,44 @@ class_labels = ["normal", "illegal"]
 
 roc_auc = roc_auc_score(true_classes, predictions)
 f1 = f1_score(true_classes, predicted_classes)
+precision = precision_score(true_classes, predicted_classes)
+recall = recall_score(true_classes, predicted_classes)
 
 print("\nClassification Report:")
 print(classification_report(true_classes, predicted_classes, target_names=class_labels))
 print(f"\nROC-AUC Score: {roc_auc:.4f}, F1 Score: {f1:.4f}")
+print(f"Precision: {precision:.4f}, Recall: {recall:.4f}")
 
+# Confusion Matrix
 print("\nConfusion Matrix:")
 conf_matrix = confusion_matrix(true_classes, predicted_classes)
 print(conf_matrix)
 
-# 그래프 그리기
-plt.figure(figsize=(12, 4))
+# ROC Curve
+fpr, tpr, _ = roc_curve(true_classes, predictions)
+roc_auc_value = auc(fpr, tpr)
 
-# Accuracy 그래프
+plt.figure(figsize=(12, 5))
+
+# ROC Curve
 plt.subplot(1, 2, 1)
-plt.plot(history.history["accuracy"], label="Train Accuracy")
-plt.plot(history.history["val_accuracy"], label="Validation Accuracy")
-plt.title("Accuracy Over Epochs")
-plt.xlabel("Epochs")
-plt.ylabel("Accuracy")
-plt.legend()
+plt.plot(fpr, tpr, color='blue', lw=2, label='ROC curve (area = %0.2f)' % roc_auc_value)
+plt.plot([0, 1], [0, 1], color='gray', lw=2, linestyle='--')
+plt.xlabel('False Positive Rate')
+plt.ylabel('True Positive Rate')
+plt.title('Receiver Operating Characteristic (ROC)')
+plt.legend(loc="lower right")
 
-# Loss 그래프
+# Precision-Recall Curve
+precision_vals, recall_vals, _ = precision_recall_curve(true_classes, predictions)
+avg_precision = average_precision_score(true_classes, predictions)
+
 plt.subplot(1, 2, 2)
-plt.plot(history.history["loss"], label="Train Loss")
-plt.plot(history.history["val_loss"], label="Validation Loss")
-plt.title("Loss Over Epochs")
-plt.xlabel("Epochs")
-plt.ylabel("Loss")
-plt.legend()
+plt.plot(recall_vals, precision_vals, color='green', lw=2, label='Precision-Recall curve (AP = %0.2f)' % avg_precision)
+plt.xlabel('Recall')
+plt.ylabel('Precision')
+plt.title('Precision-Recall Curve')
+plt.legend(loc="lower left")
 
 plt.tight_layout()
 plt.show()
